@@ -27,6 +27,7 @@
  **************************************************************************/
 #include "SVGFPass.h"
 #include "RenderGraph/RenderPassLibrary.h"
+#include "RenderGraph/RenderPassReflection.h"
 
 /*
 TODO:
@@ -168,7 +169,7 @@ RenderPassReflection SVGFPass::reflect(const CompileData& compileData)
         .bindFlags(Resource::BindFlags::RenderTarget | Resource::BindFlags::ShaderResource)
         ;
 
-    reflector.addOutput(kOutputBufferFilteredImage, "Filtered image").format(ResourceFormat::RGBA16Float);
+    reflector.addOutput(kOutputBufferFilteredImage, "Filtered image").format(ResourceFormat::RGBA16Float).flags(RenderPassReflection::Field::Flags::Persistent);
 
     return reflector;
 }
@@ -191,6 +192,8 @@ void SVGFPass::execute(RenderContext* pRenderContext, const RenderData& renderDa
     Texture::SharedPtr pMotionVectorTexture = renderData.getTexture(kInputBufferMotionVector);
 
     Texture::SharedPtr pOutputTexture = renderData.getTexture(kOutputBufferFilteredImage);
+
+    renderData.getDictionary()["SVGFColor"] = pOutputTexture;
 
     FALCOR_ASSERT(mpFilteredIlluminationFbo &&
            mpFilteredIlluminationFbo->getWidth() == pAlbedoTexture->getWidth() &&

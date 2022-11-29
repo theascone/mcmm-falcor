@@ -1,5 +1,14 @@
 ![](docs/images/teaser.png)
 
+# Markov Chain Mixture Models for Real-Time Direct Illumination
+
+This repository contains the Falcor implementation of the paper\
+Markov Chain Mixture Models for Real-Time Direct Illumination. ([Link](https://cg.ivd.kit.edu/mcmm.php))\
+Dittebrandt et al., CGF (Eurographics Symposium on Rendering), 42(4), 2023.
+
+The corresponding render pass is located under [Source/RenderPasses/GuidedPathTracer2](Source/RenderPasses/GuidedPathTracer2) and can be used in place of the default path tracer render pass.\
+It is licenced under the terms of GPLv3 ([Licence Text](Source/RenderPasses/GuidedPathTracer2/LICENCE.txt))
+
 # Falcor 5.2
 
 Falcor is a real-time rendering framework supporting DirectX 12. It aims to improve productivity of research and prototype projects.

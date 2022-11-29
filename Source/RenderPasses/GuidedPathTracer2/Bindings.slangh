@@ -1,0 +1,43 @@
+#ifndef BINDINGS_H_
+#define BINDINGS_H_
+
+#include "Scene/SceneDefines.slangh"
+
+// Static configuration based on defines set from the host.
+#define is_valid(name) (is_valid_##name != 0)
+
+import Params;
+import Scene.Scene;
+import Scene.HitInfo;
+
+cbuffer ParamsCB : register(b0)
+{
+    Params gParams;
+}
+
+// Inputs
+Texture2D<PackedHitInfo> gVBuffer;
+Texture2D<float4> gViewW; // Optional
+Texture2D gMotion;
+
+Texture2D<float4> gSVGFColor;
+
+// Outputs
+RWTexture2D<float4> gOutputColor;
+
+// Internal
+Texture2D<float4> gMCStateIn1;
+Texture2D<float4> gMCStateIn2;
+RWTexture2D<float4> gMCStateOut1;
+RWTexture2D<float4> gMCStateOut2;
+
+RWBuffer<float4> gDebugPos;
+RWTexture2D<float4> gDebugSamples;
+RWTexture2D<float4> gDebugPdf;
+RWTexture2D<float4> gDebugTile;
+
+RWBuffer<uint> gDebugHead;
+RWStructuredBuffer<float3> gDebugFSamples;
+RWTexture2D<float4> gDebugOutlier;
+
+#endif

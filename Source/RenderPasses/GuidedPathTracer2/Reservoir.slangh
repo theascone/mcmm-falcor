@@ -1,0 +1,90 @@
+import Utils.Math.PackedFormats;
+
+#include "Common.slangh"
+
+struct Sample
+{
+    float3 position;
+    float3 direction;
+    float distance;
+
+    __init()
+    {
+        position = { 0, 0, 0 };
+        direction = { 0, 0, 0 };
+        distance = 0;
+    }
+}
+
+struct Reservoir<T>
+{
+    T x;
+    float M;
+    float W;
+
+    __init()
+    {
+        M = 0;
+        W = 0;
+    }
+
+    bool valid()
+    {
+        return W > 0;
+    }
+
+    [mutating]
+    void clamp(float C)
+    {
+        if (!valid())
+            return;
+        float CM = min(M, C);
+        W *= CM / M;
+        M = CM;
+    }
+
+    [mutating]
+    void insert(T y, float w, float rnd)
+    {
+        M += 1;
+        W += w;
+
+        if (valid() && rnd < w / W)
+            x = y;
+    }
+};
+
+void reprojectReservoirSample(inout Reservoir<Sample> res, float3 position)
+{
+    if (res.x.distance == 1.0f / 0.0f)
+    {
+        res.x.position = position;
+        return;
+    }
+
+    float3 target = res.x.position + res.x.distance * res.x.direction;
+    res.x.position = position;
+    res.x.direction = target - res.x.position;
+    res.x.distance = length(res.x.direction);
+    res.x.direction = normalize(res.x.direction);
+}
+
+void packReservoirSample(Reservoir<Sample> res, out float4 a, out float4 b)
+{
+    a.xyz = res.x.position;
+    a.w = res.M;
+    b.xyz = packDirection(res.x.direction);
+    b.z *= res.x.distance;
+    b.w = res.W;
+}
+
+Reservoir<Sample> unpackReservoirSample(float4 a, float4 b)
+{
+    Reservoir<Sample> res;
+    res.x.position = a.xyz;
+    res.M = a.w;
+    res.x.direction = unpackDirection(b.xyz);
+    res.x.distance = abs(b.z);
+    res.W = b.w;
+    return res;
+}

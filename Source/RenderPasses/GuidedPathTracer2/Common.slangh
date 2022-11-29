@@ -1,0 +1,216 @@
+#ifndef COMMON_H_
+#define COMMON_H_
+
+#include "Bindings.slangh"
+#include "Utils/Math/MathConstants.slangh"
+
+import Scene.Intersection;
+import Scene.Material.TextureSampler;
+import Scene.Material.MaterialFactory;
+
+inline float3x3 onb(float3 n)
+{
+    float sign = n.z < 0 ? -1 : 1;
+    float a = -1.0f / (sign + n.z);
+    float b = n.x * n.y * a;
+
+    return {
+        1.0f + sign * n.x * n.x * a, b, n.x,
+        sign * b, sign + n.y * n.y * a, n.y,
+        -sign * n.x, -n.y, n.z
+    };
+}
+
+float signP(float x)
+{
+    return x > 0.f ? 1.0f : -1.f;
+}
+
+float3 packDirection(float3 direction)
+{
+    return float3(direction.xy, signP(direction.z));
+}
+
+float3 unpackDirection(float3 packed)
+{
+    return float3(packed.xy, signP(packed.z) * sqrt(1 - packed.x * packed.x - packed.y * packed.y));
+}
+
+float2 dir2pnt(float3 dir)
+{
+    float2 uv = float2(
+        atan2(dir[0], dir[2]) / (2.f * M_PI),
+        acos(dir[1]) / M_PI);
+    uv -= floor(uv);
+    return uv;
+}
+
+float3 pnt2dir(float2 pnt)
+{
+    float theta = pnt.y * M_PI;
+    float phi = pnt.x * 2.f * M_PI;
+    return float3(
+        sin(phi) * sin(theta),
+        cos(theta),
+        cos(phi) * sin(theta));
+}
+
+float3 color_map(float t)
+{
+    if (isnan(t) || isinf(t) || t < 0.f)
+        return float3(1, 0.1, 0.5);
+    t = clamp(t, 0, 1);
+
+    const float3 c0 = float3(0.2777273272234177, 0.005407344544966578, 0.3340998053353061);
+    const float3 c1 = float3(0.1050930431085774, 1.404613529898575, 1.384590162594685);
+    const float3 c2 = float3(-0.3308618287255563, 0.214847559468213, 0.09509516302823659);
+    const float3 c3 = float3(-4.634230498983486, -5.799100973351585, -19.33244095627987);
+    const float3 c4 = float3(6.228269936347081, 14.17993336680509, 56.69055260068105);
+    const float3 c5 = float3(4.776384997670288, -13.74514537774601, -65.35303263337234);
+    const float3 c6 = float3(-5.435455855934631, 4.645852612178535, 26.3124352495832);
+
+    return c0 + t * (c1 + t * (c2 + t * (c3 + t * (c4 + t * (c5 + t * c6)))));
+}
+
+uint extractBits(uint value, uint offset, uint bits)
+{
+    return (value >> offset) & ((1 << bits) - 1);
+}
+
+uint leftShift2(uint x)
+{
+    x = (x | (x << 8)) & 0x00FF00FF;
+    x = (x | (x << 4)) & 0x0F0F0F0F;
+    x = (x | (x << 2)) & 0x33333333;
+    x = (x | (x << 1)) & 0x55555555;
+    return x;
+}
+
+uint encode2(float3 dir, uint2 idx)
+{
+    uint2 pnt = uint2(dir2pnt(dir) * (1 << 12));
+    return leftShift2(pnt.y) << 9 | leftShift2(pnt.x) << 8 | idx.y << 4 | idx.x;
+}
+
+uint encode2x16(float2 f)
+{
+    return f32tof16(f.y) << 16 | f32tof16(f.x);
+}
+
+float2 decode2x16(uint e)
+{
+    return float2(f16tof32(e & 0xffff), f16tof32(e >> 16));
+}
+
+/** Returns the primary ray's direction.
+ */
+float3 getPrimaryRayDir(uint2 launchIndex, uint2 launchDim, const Camera camera)
+{
+    if (is_valid(gViewW))
+    {
+        // If we have the view vector bound as a buffer, just fetch it. No need to compute anything.
+        return -gViewW[launchIndex].xyz;
+    }
+    else
+    {
+        // Compute the view vector. This must exactly match what the G-buffer pass is doing (jitter etc.).
+        // Note that we do not take depth-of-field into account as it would require exactly matching the
+        // sample generator between the passes, which is error prone. The host side will issue a warning instead.
+        return camera.computeRayPinhole(launchIndex, launchDim).dir;
+    }
+}
+
+/** Setup ShadingData based on loaded vertex/material attributes for a hit point.
+    \param[in] hit Hit information.
+    \param[in] rayOrigin Ray origin.
+    \param[in] rayDir Normalized ray direction.
+    \param[in] lod Method for computing texture level-of-detail.
+    \return ShadingData struct.
+*/
+ShadingData loadShadingData(const HitInfo hit, const float3 rayOrigin, const float3 rayDir, const ITextureSampler lod)
+{
+    VertexData v = {};
+    uint materialID = {};
+
+#if SCENE_HAS_GEOMETRY_TYPE(GEOMETRY_TYPE_TRIANGLE_MESH)
+    if (hit.getType() == HitType::Triangle)
+    {
+        const TriangleHit triangleHit = hit.getTriangleHit();
+        v = gScene.getVertexData(triangleHit);
+        materialID = gScene.getMaterialID(triangleHit.instanceID);
+    }
+#endif
+#if SCENE_HAS_GEOMETRY_TYPE(GEOMETRY_TYPE_DISPLACED_TRIANGLE_MESH)
+    if (hit.getType() == HitType::DisplacedTriangle)
+    {
+        const DisplacedTriangleHit displacedTriangleHit = hit.getDisplacedTriangleHit();
+        v = gScene.getVertexData(displacedTriangleHit, -rayDir);
+        materialID = gScene.getMaterialID(displacedTriangleHit.instanceID);
+    }
+#endif
+#if SCENE_HAS_GEOMETRY_TYPE(GEOMETRY_TYPE_CURVE)
+    if (hit.getType() == HitType::Curve)
+    {
+        const CurveHit curveHit = hit.getCurveHit();
+        v = gScene.getVertexDataFromCurve(curveHit);
+        materialID = gScene.getMaterialID(curveHit.instanceID);
+    }
+#endif
+#if SCENE_HAS_GEOMETRY_TYPE(GEOMETRY_TYPE_SDF_GRID)
+    if (hit.getType() == HitType::SDFGrid)
+    {
+        const SDFGridHit sdfGridHit = hit.getSDFGridHit();
+        v = gScene.getVertexDataFromSDFGrid(sdfGridHit, rayOrigin, rayDir);
+        materialID = gScene.getMaterialID(sdfGridHit.instanceID);
+    }
+#endif
+
+    ShadingData sd = gScene.materials.prepareShadingData(v, materialID, -rayDir, lod);
+
+    return sd;
+}
+
+/** Setup ShadingData based on loaded vertex/material attributes for a hit point.
+    \param[in] hit Hit information.
+    \param[in] rayOrigin Ray origin.
+    \param[in] rayDir Normalized ray direction.
+    \param[in] lod Method for computing texture level-of-detail.
+    \return ShadingData struct.
+*/
+VertexData loadVertexData(const HitInfo hit, const float3 rayOrigin, const float3 rayDir, const ITextureSampler lod)
+{
+    VertexData v = {};
+
+#if SCENE_HAS_GEOMETRY_TYPE(GEOMETRY_TYPE_TRIANGLE_MESH)
+    if (hit.getType() == HitType::Triangle)
+    {
+        const TriangleHit triangleHit = hit.getTriangleHit();
+        v = gScene.getVertexData(triangleHit);
+    }
+#endif
+#if SCENE_HAS_GEOMETRY_TYPE(GEOMETRY_TYPE_DISPLACED_TRIANGLE_MESH)
+    if (hit.getType() == HitType::DisplacedTriangle)
+    {
+        const DisplacedTriangleHit displacedTriangleHit = hit.getDisplacedTriangleHit();
+        v = gScene.getVertexData(displacedTriangleHit, -rayDir);
+    }
+#endif
+#if SCENE_HAS_GEOMETRY_TYPE(GEOMETRY_TYPE_CURVE)
+    if (hit.getType() == HitType::Curve)
+    {
+        const CurveHit curveHit = hit.getCurveHit();
+        v = gScene.getVertexDataFromCurve(curveHit);
+    }
+#endif
+#if SCENE_HAS_GEOMETRY_TYPE(GEOMETRY_TYPE_SDF_GRID)
+    if (hit.getType() == HitType::SDFGrid)
+    {
+        const SDFGridHit sdfGridHit = hit.getSDFGridHit();
+        v = gScene.getVertexDataFromSDFGrid(sdfGridHit, rayOrigin, rayDir);
+    }
+#endif
+
+    return v;
+}
+
+#endif

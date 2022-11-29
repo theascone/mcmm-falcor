@@ -1,0 +1,300 @@
+#include "Common.slangh"
+
+import Scene.ShadingData;
+
+float VMFPdf(float k, float dot)
+{
+    float e1 = 2 * M_PI * (1 - exp(-2 * k));
+    float e2 = exp(k * (dot - 1));
+    return k / e1 * e2;
+}
+
+float VMFKForPdf(float pdf)
+{
+    if (pdf > 0.795)
+        return 2 * M_PI * pdf;
+    else
+        return max(1e-5, (168.479 * pdf * pdf + 16.4585 * pdf - 2.39942) / (-1.12718 * pdf * pdf + 29.1433 * pdf + 1));
+}
+
+/*
+struct SufficientStatistics
+{
+    float3 sumWeightedDirections;
+    float sumWeights;
+    float sum;
+
+    __init()
+    {
+        sumWeightedDirections = { 0, 0, 0 };
+        sumWeights = 0;
+        sum = 0;
+    }
+}
+*/
+
+struct MCStateMLE
+{
+    float f;
+    float N;
+    float sumOfWeights;
+    float sumOfWeightedDirectionsLength;
+    float3 sumOfWeightedTargets;
+
+    __init()
+    {
+        f = 0;
+        N = 0;
+        sumOfWeights = 0;
+        sumOfWeightedDirectionsLength = 0;
+        sumOfWeightedTargets = float3(0);
+    }
+
+    __init(in float4 a, in float4 b)
+    {
+        unpack(a, b);
+    }
+
+    bool valid()
+    {
+        return sumOfWeights > 0;
+    }
+
+    [mutating]
+    void pack(out float4 a, out float4 b)
+    {
+        a.x = f;
+        a.y = N;
+        a.z = sumOfWeights;
+        a.w = sumOfWeightedDirectionsLength;
+        b.xyz = sumOfWeightedTargets;
+        b.w = 0;
+    }
+
+    float3 getTarget()
+    {
+        return sumOfWeightedTargets / (sumOfWeights > 0 ? sumOfWeights : 1);
+    }
+
+    float3 getDirection(float3 position)
+    {
+        return normalize(getTarget() - position);
+    }
+
+    [mutating]
+    void unpack(in float4 a, in float4 b)
+    {
+        f = a.x;
+        N = a.y;
+        sumOfWeights = a.z;
+        sumOfWeightedDirectionsLength = a.w;
+        sumOfWeightedTargets = b.xyz;
+    }
+
+    [mutating]
+    void decay(float alpha)
+    {
+        N *= alpha;
+        sumOfWeights *= alpha;
+        sumOfWeightedDirectionsLength *= alpha;
+        sumOfWeightedTargets *= alpha;
+    }
+
+    [mutating]
+    void add(float3 position, float weight, float3 direction, float3 target)
+    {
+        N = min(N + 1, gParams.MLEMaxN);
+        float alpha = max(1. / N, gParams.MLEMinAlpha);
+        sumOfWeights = lerp(sumOfWeights, weight, alpha);
+        sumOfWeightedTargets = lerp(sumOfWeightedTargets, weight * target, alpha);
+        float3 sumOfWeightedDirections = sumOfWeightedDirectionsLength * getDirection(position);
+        sumOfWeightedDirections = lerp(sumOfWeightedDirections, weight * direction, alpha);
+        sumOfWeightedDirectionsLength = length(sumOfWeightedDirections);
+    }
+
+    VMF vmf(float3 position)
+    {
+        float r_ = sumOfWeightedDirectionsLength / sumOfWeights;
+
+        r_ = (N * N * r_) / (N * N + gParams.MLEPriorN);
+
+        VMF vmf;
+        vmf.direction = getDirection(position);
+        vmf.kappa = (3 * r_ - r_ * r_ * r_) / (1 - r_ * r_);
+        return vmf;
+    }
+
+    [mutating]
+    void waveShuffle(int lane)
+    {
+        f = WaveReadLaneAt(f, lane);
+        N = WaveReadLaneAt(N, lane);
+        sumOfWeights = WaveReadLaneAt(sumOfWeights, lane);
+        sumOfWeightedDirectionsLength = WaveReadLaneAt(sumOfWeightedDirectionsLength, lane);
+        sumOfWeightedTargets = WaveReadLaneAt(sumOfWeightedTargets, lane);
+    }
+
+    MCStateMLE waveReadLaneAt(int lane)
+    {
+        MCStateMLE state;
+        state.f = WaveReadLaneAt(f, lane);
+        state.N = WaveReadLaneAt(N, lane);
+        state.sumOfWeights = WaveReadLaneAt(sumOfWeights, lane);
+        state.sumOfWeightedDirectionsLength = WaveReadLaneAt(sumOfWeightedDirectionsLength, lane);
+        state.sumOfWeightedTargets = WaveReadLaneAt(sumOfWeightedTargets, lane);
+        return state;
+    }
+};
+
+struct MCState
+{
+    float3 target;
+    float3 normal;
+    float f;
+    float kappa;
+    float acc;
+
+    __init()
+    {
+        target = float3(0);
+        normal = float3(0);
+        f = 0;
+        kappa = 0;
+        acc = 0;
+    }
+
+    __init(in float4 a, in float4 b)
+    {
+        unpack(a, b);
+    }
+
+    void pack(out float4 a, out float4 b)
+    {
+        a = float4(target, f);
+        b.xyz = packDirection(normal);
+        b.z *= kappa;
+        b.w = acc;
+    }
+
+    [mutating]
+    void unpack(in float4 a, in float4 b)
+    {
+        target = a.xyz;
+        f = a.w;
+        normal = unpackDirection(b.xyz);
+        kappa = abs(b.z);
+        acc = b.w;
+    }
+
+    bool valid()
+    {
+        return f > 0 && kappa > 0 && !isinf(f) && !isinf(kappa);
+    }
+
+    VMF vmf(in float3 posW)
+    {
+        VMF vmf;
+        vmf.direction = normalize(target - posW);
+        vmf.kappa = kappa;
+        return vmf;
+    }
+
+    VMF vmf(in ShadingData sd)
+    {
+        return vmf(sd.posW);
+    }
+
+    [mutating]
+    void waveShuffle(int lane)
+    {
+        target = WaveReadLaneAt(target, lane);
+        normal = WaveReadLaneAt(normal, lane);
+        f = WaveReadLaneAt(f, lane);
+        kappa = WaveReadLaneAt(kappa, lane);
+        acc = WaveReadLaneAt(acc, lane);
+    }
+
+    MCState waveReadLaneAt(int lane)
+    {
+        MCState state;
+        state.target = WaveReadLaneAt(target, lane);
+        state.normal = WaveReadLaneAt(normal, lane);
+        state.f = WaveReadLaneAt(f, lane);
+        state.kappa = WaveReadLaneAt(kappa, lane);
+        state.acc = WaveReadLaneAt(acc, lane);
+        return state;
+    }
+};
+
+float G(in ShadingData sd1, in ShadingData sd2)
+{
+    float3 diff = sd2.posW - sd1.posW;
+    return max(dot(sd1.N, diff), 0) * max(dot(sd2.N, -diff), 0) / dot(diff, diff);
+}
+
+float G(in MCState state, in ShadingData sd)
+{
+    float3 diff = state.target - sd.posW;
+    return max(dot(sd.N, diff), 0) * max(dot(state.normal, -diff), 0) / dot(diff, diff);
+}
+
+struct VMF
+{
+    float3 direction;
+    float kappa = 0;
+
+    __init()
+    {
+        direction = float3(0);
+        kappa = 0;
+    }
+
+    /*
+    [mutating]
+    void estimateKappaWeight(SufficientStatistics stat)
+    {
+        float3 r = stat.sumWeightedDirections;
+        float rl = length(r);
+        if (rl > 0)
+        {
+            float r_ = rl / stat.sumWeights;
+
+            weight = stat.sumWeights / stat.sum;
+
+            // u = r / rl;
+            kappa = (3 * r_ - r_ * r_ * r_) / (1. - r_ * r_);
+
+            kappa = min(kappa, 10000.f);
+        }
+    }
+    */
+
+    bool valid()
+    {
+        return kappa > 0;
+    }
+
+    float3 sample(float2 rnd)
+    {
+        float W = 1 + log(rnd.y + (1 - rnd.y) * exp(-2 * kappa)) / kappa;
+        float W2 = sqrt(1 - W * W);
+
+        float3 dir = {
+            W2 * cos(2 * M_PI * rnd.x),
+            W2 * sin(2 * M_PI * rnd.x),
+            W
+        };
+
+        return mul(onb(direction), dir);
+    }
+
+    float cosQuantile(float q)
+    {
+        return 1 + log(q + (1 - q) * exp(-2 * kappa)) / kappa;
+    }
+
+    float pdf(float3 dir)
+    {
+        return VMFPdf(kappa, dot(direction, dir));
+    }
+};
